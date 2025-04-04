@@ -1,35 +1,39 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
-import re
+import openai
 
 app = Flask(__name__)
-CORS(app)  # CORS 활성화
+CORS(app)  
 
-# 네이버 지도 API 키 설정
-MAPS_CLIENT_ID = "YOUR ID"
-MAPS_CLIENT_SECRET = "YOUR SECRET"
+# API KEY(Naver Map(사용X), Kakao, OpenAI)
+# MAPS_CLIENT_ID = "key1"
+# MAPS_CLIENT_SECRET = "key2"
+KAKAO_REST_API_KEY = "key3"
+OPENAI_API_KEY = "key4"
 
-# 뉴스 수집 함수
+openai.api_key = OPENAI_API_KEY
+
+
+# 네이버 뉴스 API 설정
 def fetch_news(region, category):
     API_ENDPOINT = "https://openapi.naver.com/v1/search/news.json"
-    CLIENT_ID = "YOUR ID"
-    CLIENT_SECRET = "YOUR SECRETw"
-
+    CLIENT_ID = "0Cp4ZSUyFClLIiU2e7dC"
+    CLIENT_SECRET = "z2jtzBBShU"
     query = f"{region} {category}"
-
+    
     headers = {
         "X-Naver-Client-Id": CLIENT_ID,
         "X-Naver-Client-Secret": CLIENT_SECRET,
     }
-
+    
     params = {
         "query": query,
-        "display": 10,  # 최대 10개 뉴스
+        "display": 10,
         "start": 1,
-        "sort": "sim",  # 유사도 기준 정렬
+        "sort": "sim",
     }
-
+    
     response = requests.get(API_ENDPOINT, headers=headers, params=params)
     if response.status_code == 200:
         items = response.json().get("items", [])
@@ -37,93 +41,148 @@ def fetch_news(region, category):
             {
                 "title": item["title"].replace("<b>", "").replace("</b>", ""),
                 "link": item["link"],
-                "description": item.get("description", "기사 본문의 요약문이 없습니다.").replace("<b>", "").replace("</b>", "")
+                "description": item.get("description", "기사 본문의 요약문이 없습니다.").replace("<b>", "").replace("</b>", "") 
             }
             for item in items
         ]
     return []
 
-import re
+# ChatGPT API를 사용한 지역명 추출 함수 ('지역+카테고리' 고려)
+def extract_region_chatgpt(text, target_region, category):
+    prompt = f"""
+    다음 뉴스 기사를 분석하고 '{target_region}' + '{category}'와 가장 관련된 장소 오직 한 개만 추출해줘. 
+    추출된 장소는 {target_region}내에 있어야 돼: 
+    "{text}"
+    결과는 쉼표로 구분된 리스트로 제공해줘.
+    """
 
-# 지역명을 좌표로 변환하는 함수
-def fetch_coordinates(region):
-    GEOCODE_API = "https://naveropenapi.apigw.ntruss.com/map-geocode/v2/geocode"
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are an AI that extracts only relevant location names from news articles."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    extracted_text = response["choices"][0]["message"]["content"].strip()
+    locations = [loc.strip() for loc in extracted_text.split(",") if loc.strip()]
+    print(f"[ChatGPT] Extracted locations (category-aware): {locations}")
+    return locations if locations else None
+
+# 네이버 지도 API를 활용한 좌표 변환 함수
+def fetch_coordinates(region_name, target_region=None):
+    BASE_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
     headers = {
-        "X-NCP-APIGW-API-KEY-ID": MAPS_CLIENT_ID,
-        "X-NCP-APIGW-API-KEY": MAPS_CLIENT_SECRET,
+        "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}"
     }
-    params = {"query": region}
 
-    response = requests.get(GEOCODE_API, headers=headers, params=params)
+    # 예: "응봉산" → "성동구 응봉산"
+    query = f"{target_region} {region_name}" if target_region and target_region not in region_name else region_name
+    params = {"query": query.strip()}
+
+    response = requests.get(BASE_URL, headers=headers, params=params)
+
     if response.status_code == 200:
-        results = response.json().get("addresses", [])
-        if results:
-            location = results[0]
-            print(f"{region}의 좌표: {location['y']}, {location['x']}")  # 디버깅 로그
+        data = response.json()
+        documents = data.get("documents", [])
+        if documents:
+            place = documents[0]  # 관련도 가장 높은 장소
             return {
-                "lat": location["y"],
-                "lng": location["x"],
+                "name": place.get("place_name"),
+                "lat": place.get("y"),
+                "lng": place.get("x"),
+                "address": place.get("address_name")
             }
-        print(f"{region}에 대한 좌표 결과 없음")  # 디버깅 로그
+        else:
+            print(f"[WARN] 장소 검색 결과 없음: {query}")
+            print("[DEBUG] 응답:", data)
     else:
-        print(f"API 요청 실패: {response.status_code}, {response.text}")  # 디버깅 로그
+        print(f"[ERROR] 카카오 장소 검색 실패: {query}, Status: {response.status_code}")
+        print("[DEBUG] 응답 내용:", response.text)
+
     return None
 
-# 기사 본문에서 지역명을 추출하는 함수
-def extract_region(description):
-    # 정규식으로 지역명 추출
-    match = re.search(r"([가-힣]+시|[가-힣]+군|[가-힣]+구|[가-힣]+읍|[가-힣]+면)", description)
-    if match:
-        print(f"추출된 지역명: {match.group(1)}")  # 디버깅 로그
-        return match.group(1)
-    print("지역명 추출 실패")  # 디버깅 로그
-    return None
 
-# 뉴스에 포함된 지역명을 기반으로 좌표를 추가
-def enhance_news_with_coordinates(news_data):
+   
+# 뉴스 데이터에 좌표 추가
+def enhance_news_with_coordinates(news_data, target_region, category):
     enhanced_news = []
 
     for article in news_data:
-        region_name = extract_region(article["description"])
-        if region_name:
-            coordinates = fetch_coordinates(region_name)
-            if coordinates:
-                article["lat"] = coordinates["lat"]
-                article["lng"] = coordinates["lng"]
-            else:
-                article["lat"] = None
-                article["lng"] = None
-        else:
-            # 지역명이 없으면 기본값 할당
-            article["lat"] = None
-            article["lng"] = None
+        region_names = extract_region_chatgpt(article["description"], target_region, category)
+        print(f"[INFO] Extracted regions from news: {region_names}")
 
+        locations = []
+        if region_names:
+            for region in region_names:
+                coordinates = fetch_coordinates(region, target_region)
+                if coordinates:
+                    locations.append({
+                        "name": region,
+                        "lat": coordinates["lat"],
+                        "lng": coordinates["lng"]
+                    })
+        
+        article["locations"] = locations
         enhanced_news.append(article)
-
+    
     return enhanced_news
 
-# 뉴스와 좌표 데이터를 통합
-@app.route("/search_news", methods=["GET"])
+# 뉴스 검색 API
+@app.route("/search_news", methods=["GET"])    
 def search_news():
     region = request.args.get("region")
     category = request.args.get("category")
-
+    
     if not region or not category:
         return jsonify({"error": "Region and category are required"}), 400
-
-    coordinates = fetch_coordinates(region)
-    if not coordinates:
-        return jsonify({"error": f"Failed to find coordinates for region: {region}"}), 404
-
+    
     news_data = fetch_news(region, category)
-    enhanced_news = enhance_news_with_coordinates(news_data)
-
+    enhanced_news = enhance_news_with_coordinates(news_data, region, category)
+    
     return jsonify({
         "region": region,
         "category": category,
-        "coordinates": coordinates,
         "news": enhanced_news,
     })
+
+def route_search():
+    origin = request.args.get("origin")
+    destination = request.args.get("destination")
+
+    if not origin or not destination:
+        return jsonify({"error": "origin and destination are required"}), 400
+
+    origin_coords = fetch_coordinates(origin)
+    dest_coords = fetch_coordinates(destination)
+
+    if not origin_coords or not dest_coords:
+        return jsonify({"error": "좌표를 찾을 수 없습니다."}), 400
+
+    url = "https://apis-navi.kakaomobility.com/v1/directions/transit"
+    headers = {
+        "Authorization": f"KakaoAK {KAKAO_REST_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "origin": {
+            "x": origin_coords["lng"],
+            "y": origin_coords["lat"]
+        },
+        "destination": {
+            "x": dest_coords["lng"],
+            "y": dest_coords["lat"]
+        },
+        "priority": "RECOMMEND"
+    }
+
+    response = requests.post(url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        route_info = response.json()
+        return jsonify(route_info)
+    else:
+        print("[ERROR] 카카오 경로 탐색 실패", response.text)
+        return jsonify({"error": "경로 탐색 실패"}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
